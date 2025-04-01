@@ -7,7 +7,7 @@ RangeGate=R/2+50;
 M=4;%Number of channels used
 ChannelNumber=5;
 K=20*N;
-sigma=2.5e-7;
+sigma=1.5e-7;% Noise standard deviation
 Sample_CovNoise=sigma*(randn(M*N,K)+1i*randn(M*N,K))/sqrt(2);% Noise generation
 Mean_Noise=mean(Sample_CovNoise,2);
 x_n=Sample_CovNoise;
@@ -24,11 +24,11 @@ end
 [U1,D1,V1]=svd(Hc+x_n);
 %%
 figure(1)
-semilogy(10*log10(diag(D)));
+semilogy(10*log10(diag(D)),LineWidth=2,Color='blue',LineStyle='--');
 hold on;
-semilogy(10*log10(diag(sigma_2)));
+semilogy(10*log10(diag(sigma_2)),LineWidth=2,Color='red',LineStyle='-.');
 hold on;
-semilogy(10*log10(diag(D1))); 
+semilogy(10*log10(diag(D1)),LineWidth=2,Color=[0.4660 0.6740 0.1880]); 
 hold off;
 grid on;
 % Set tick labels with LaTeX fonts
@@ -53,7 +53,7 @@ set(gca, 'FontSize', 12, 'FontName', 'Times', 'TickLabelInterpreter', 'latex')
 set(h, 'FontSize', 12, 'FontName', 'Times', 'TickLabelInterpreter', 'latex')
 %% SVD Plot of Clutter Plus Noise Covariance Matrix
 figure(3)
-semilogy(10*log10(sigma^2*svd(Cov)));
+semilogy(10*log10(sigma^2*svd(Cov)),LineWidth=2);
 % Samples=(Hc+Sample_CovNoise)/sigma;
 xlabel('Singular Value Index',Interpreter='latex');
 ylabel('Scaled Singular Magnitude (dB)',Interpreter='latex');
@@ -70,7 +70,7 @@ s_m = storeIndexSets(p, p - 1);
 W_struct = generateWeightMatrices(p);
 bandwidth=30;%bandsize for TABASCO
 %% Monte Carlo parameters
-Monte = 100;
+Monte = 10;
 Num_samples = floor(2 .^ linspace(7, 9, 7));
 MP_median=zeros(size(Num_samples));
 for i=1:length(Num_samples)
@@ -126,7 +126,7 @@ parfor monte = 1:Monte
         end
 
         % Estimate covariance matrix
-        lambda = 2 * sqrt(log(p) / n);
+        lambda = 3 * sqrt(log(p) / n);
         hat_R = struct();
         for l = 1:p - 1
             sum_mat = zeros(p, p);
