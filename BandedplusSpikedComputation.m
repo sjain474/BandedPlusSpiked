@@ -70,7 +70,7 @@ s_m = storeIndexSets(p, p - 1);
 W_struct = generateWeightMatrices(p);
 bandwidth=30;%bandsize for TABASCO
 %% Monte Carlo parameters
-Monte = 10;
+Monte = 100;% Number of Monte Carlo Simulations
 Num_samples = floor(2 .^ linspace(7, 9, 7));
 MP_median=zeros(size(Num_samples));
 for i=1:length(Num_samples)
