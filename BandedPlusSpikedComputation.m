@@ -1,14 +1,19 @@
-clear all;
-clc;
-
+clear all 
 %% ================================================================
 % Load RFView Dataset
 % ------------------------------------------------
-% Dataset: Cofar_Monte100_ICM_14_31.mat
-% Contains 100 Monte Carlo datacubes with clutter responses.
-% Extract simulation parameters and initialize storage.
+% Dataset: Cofar_Monte100_ICM_14_31.mat for 64 pulses 
+% Dataset: Cofar_Monte100_ICM_14_31_Pulses_32.mat for 32 pulses
+% Contains 100 Monte Carlo radar datacubes with clutter responses.
+% Variables:
+%   - L : # angle cells
+%   - R : # range bins
+%   - N : # pulses
+%   - M : # channels
+%   - RangeGate : range index
+%   - Hc_Cells  : cell array of clutter responses
 % ================================================================
-Data=load("Cofar_Monte100_ICM_14_31.mat");% SIM contains the necessary parameters
+Data=load("Cofar_Monte100_ICM_14_31.mat"); % SIM contains parameters + clutter data
 L=Data.L;
 R=Data.R;
 N=Data.N;
@@ -16,20 +21,20 @@ M=Data.M;
 RangeGate=Data.RangeGate;
 Hc_Cells=Data.Hc_Cell;
 
-% Dimensions
+% Initialization
 [p,K]=size(Hc_Cells{1});
 R=zeros(p,p);
 M_samples=length(Hc_Cells);
-
-% Noise level
-sigma=1.5e-7; % Example: 1.5e-7 or 3.75e-8
-
-% Initialize accumulators
+sigma=1.5e-7;
 Hc=zeros(p,K);
 Cc=zeros(p,p);
 
 %% ================================================================
-% Build clutter-only covariance (Cc) and clutter+noise covariance (R)
+% Compute covariance matrices
+% ------------------------------------------------
+% - Cc : true clutter covariance
+% - R  : clutter+noise covariance
+% Gaussian noise ~ CN(0, sigma^2)
 % ================================================================
 for m=1:M_samples
     Hc=Hc_Cells{m};
@@ -39,17 +44,17 @@ for m=1:M_samples
 end
 R=R/(M_samples*K);
 
-% Singular Value Decomposition
+% Singular value decomposition (SVD)
 [~,D,~]=svd(Cc/(M_samples*K));
 [~,D1,~]=svd(R);
 
-% Candidate sample sizes
-n_values = floor(2 .^ linspace(7, 9, 7));
+% Parameters for simulation
+Num_samples = floor(2 .^ linspace(7, 9, 7)); % sample sizes
 sigma_2=sigma^2*eye(p);
 ChannelNumber=5;
 
 %% ================================================================
-% Plot singular values of clutter, noise, and clutter+noise
+% Plot singular values
 % ================================================================
 figure(1)
 plot(10*log10(diag(D)),LineWidth=2,Color='blue',LineStyle='--');
@@ -67,110 +72,129 @@ ylabel("Singular Value (dB)",Interpreter="latex");
 legend('Clutter','Noise','Clutter+Noise',Interpreter="latex");
 
 %% ================================================================
-% Image Plot of Clutter+Noise covariance matrix
+% Image plot of covariance matrix
 % ================================================================
 figure(2)
 imagesc(10 * log10(abs(R)))
 h = colorbar; 
 colormap('jet')
 
-% Colorbar labeling
 h.Label.String = 'Covariance Elements Magnitude (dB)';
 h.Label.Interpreter = 'latex';
 
-% Formatting
 set(gca, 'FontSize', 12, 'FontName', 'Times', 'TickLabelInterpreter', 'latex')
 set(h, 'FontSize', 12, 'FontName', 'Times', 'TickLabelInterpreter', 'latex')
 
 %% ================================================================
-% Normalize covariance and setup weight matrices
+% Normalize covariance and precompute matrices
 % ================================================================
-Sigma=R/sigma^2;
-mean_error=zeros(1,length(n_values));
-epsilon_results=zeros(1,length(n_values));
+R=R/sigma^2;
+inv_R=pinv(R);
 
-% Create weight matrices and index sets
+% Weight structures for banded+spiked covariance estimation
 w = createWeightMatrix(p);
 s_m = storeIndexSets(p, p - 1);
 W_struct = generateWeightMatrices(p);
+bandwidth=40; % band size for TABASCO
 
 %% ================================================================
-% Monte Carlo Simulation Setup
+% Monte Carlo setup
 % ================================================================
-Monte=100;
-H_c_transpose_H_c=zeros(p,p,length(n_values));
-H_c_cells = cell(length(n_values),Monte);
-MP_median=zeros(size(n_values));
-
-% Precompute Marchenko–Pastur median per n
-for i=1:length(n_values)
-    MP_median(i)=compute_MP_median(p,n_values(i));
-end
+Monte = 100; % # runs
+H_c_transpose_H_c=zeros(p,p,length(Num_samples));
+H_c_cells = cell(length(Num_samples),Monte);
 
 % Subsample clutter snapshots for each n
 for m=1:Monte
-for index=1:length(n_values)
-    if mod(n_values(index),2)==1
-        H_c_k=Hc_Cells{m}(:,K/2-(n_values(index)-1)/2:K/2+(n_values(index)-1)/2);
+for index=1:length(Num_samples)
+    if mod(Num_samples(index),2)==1
+        H_c_k=Hc_Cells{m}(:,K/2-(Num_samples(index)-1)/2:K/2+(Num_samples(index)-1)/2);
     end
-    if mod(n_values(index),2)==0
-        H_c_k=Hc_Cells{m}(:,K/2-(n_values(index))/2:K/2+(n_values(index))/2-1);
+    if mod(Num_samples(index),2)==0
+        H_c_k=Hc_Cells{m}(:,K/2-(Num_samples(index))/2:K/2+(Num_samples(index))/2-1);
     end
     H_c_cells{index,m}=H_c_k;
 end
 end
 
+% Marchenko–Pastur median
+MP_median=zeros(size(Num_samples));
+for i=1:length(Num_samples)
+MP_median(i)=compute_MP_median(p, Num_samples(i));
+end
+
+% Angle & Doppler grids
+angle_rad = (-180:10:180) * pi / 180;  
+doppler = -0.5:0.05:0.5;
+
+% Storage for SCNR results
+Rho_Total_band = zeros(Monte, length(Num_samples));
+Rho_Total_Diagonal = zeros(Monte, length(Num_samples));
+Rho_Total_Stein = zeros(Monte, length(Num_samples));
+Rho_Total_TOBASCO = zeros(Monte, length(Num_samples));
+
+Rho_Angle_band=zeros(Monte,length(Num_samples),length(angle_rad));
+Rho_Angle_Diagonal=zeros(Monte,length(Num_samples),length(angle_rad));
+Rho_Angle_Stein=zeros(Monte,length(Num_samples),length(angle_rad));
+Rho_Angle_TOBASCO=zeros(Monte,length(Num_samples),length(angle_rad));
+
+Rho_Doppler_band=zeros(Monte,length(Num_samples),length(doppler));
+Rho_Doppler_Diagonal=zeros(Monte,length(Num_samples),length(doppler));
+Rho_Doppler_Stein=zeros(Monte,length(Num_samples),length(doppler));
+Rho_Doppler_TOBASCO=zeros(Monte,length(Num_samples),length(doppler));
+
 %% ================================================================
-% Main Monte Carlo loop
-% For each n:
-%   - Generate noisy covariance S
-%   - Apply Banded+Spiked estimation
-%   - Compute Frobenius error and epsilon bound
+% Monte Carlo Simulation
 % ================================================================
-for n_idx = 1:length(n_values)
-    n = n_values(n_idx);
-    
-    local_lambda_max = zeros(1, Monte);
-    local_trace = zeros(1, Monte);
-    local_estimate=zeros(1,length(Monte));
-    local_c=zeros(1,length(Monte));
-    B_est_Cell=cell(1,Monte);
-    local_error=zeros(1,Monte);
-    local_H_c_Cells=cell(1,Monte);
-    for j=1:Monte
-        local_H_c_Cells{j}=H_c_cells{n_idx,j};
-    end
+tic;
+for monte = 1:Monte
+    % Local placeholders
+    local_rho_band = zeros(1, length(Num_samples));
+    local_rho_Diagonal = zeros(1, length(Num_samples));
+    local_rho_Stein = zeros(1, length(Num_samples));
+    local_rho_TOBASCO = zeros(1, length(Num_samples));
+    local_angle_band = zeros(length(Num_samples),length(angle_rad));
+    local_angle_Diagonal = zeros(length(Num_samples),length(angle_rad));
+    local_angle_Stein = zeros(length(Num_samples),length(angle_rad));
+    local_angle_TOBASCO = zeros(length(Num_samples),length(angle_rad));
+    local_Doppler_band = zeros(length(Num_samples),length(doppler));
+    local_Doppler_Diagonal = zeros(length(Num_samples),length(doppler));
+    local_Doppler_Stein = zeros(length(Num_samples),length(doppler));
+    local_Doppler_TOBASCO = zeros(length(Num_samples),length(doppler));
+    local_estimate=zeros(1,length(Num_samples));
 
-    % Parallel Monte Carlo
-    tic;
-    for i = 1:Monte
-        % Generate noisy covariance sample
+    for i = 1:length(Num_samples)
+        n = Num_samples(i);
+
+        % Generate noise + clutter
         noise=sigma*(randn(p,n)+1i*randn(p,n))/sqrt(2);
-        Hc=local_H_c_Cells{i};
+        Hc=H_c_cells{i,monte};
         S=(Hc*Hc'+noise*noise')/(sigma*sigma*n);
+        X=(H_c_cells{i,monte}+noise)'/sigma;
 
-        % SVD and eigenvalue estimates
+        % Eigen decomposition
         [U,eig,V]=svd(S);
         eigen=diag(eig);
-        if isnan(MP_median(n_idx))
+
+        % Normalize eigenvalues by MP median
+        if isnan(MP_median(i))
             local_estimate(i) = median(eigen);
         else
-            local_estimate(i)=median(eigen)/MP_median(n_idx);
+            local_estimate(i)=median(eigen)/MP_median(i);
         end
 
-        % Statistics
-        local_trace(i) = trace(S);
-        local_lambda_max(i) = norm(S, 2);
+        % Stein shrinkage
+        stein_shrink=optshrink_impl(eigen,p/n,'Stein',sqrt(local_estimate(i)));
+        inv_hat_Stein=U*diag(1./stein_shrink)*V'; 
         hat_sigma_2=local_estimate(i);    
-
         % Initialize A_hat
         A_hat = struct();
         for l = 1:p - 1
             A_hat(l).hat_A = zeros(p, p);
         end
 
-        % Iterative update for Banded+Spiked estimation
-        lambda = 1.5e-0 * sqrt(log(p) / n);
+        % Estimate covariance matrix
+        lambda = 1.5e-0 * sqrt(log(p) / n);%1.5%10
         hat_R = struct();
         for l = 1:p - 1
             sum_mat = zeros(p, p);
@@ -178,6 +202,7 @@ for n_idx = 1:length(n_values)
                 sum_mat = sum_mat + (W_struct(l_prime).W) .* (A_hat(l_prime).hat_A);
             end
             hat_R(l).R = (S) - lambda * sum_mat;
+            fprintf("Finding Root at iteration=%d for n=%d\n",l,Num_samples(i));
             nu = get_nu(lambda, w, l, hat_R(l).R, s_m);
             
             for m = 1:l
@@ -186,64 +211,120 @@ for n_idx = 1:length(n_values)
             end
         end
         
-        % Estimate B and its singular values
+        % Estimate B and its inverse
         sum_mat = zeros(p);
         for l = 1:p - 1
             sum_mat = sum_mat + (W_struct(l).W) .* (A_hat(l).hat_A);
         end
-        B_est = (S+hat_sigma_2*eye(p)) - lambda * sum_mat; % Banded+Spiked
-        [~,D_b,~]=svd(B_est);
-        local_c(i)=max(abs(diag(D_b)));
-        B_est_Cell{i}=B_est;
-
-        % Frobenius error
-        local_error(i)=norm(B_est-Sigma,'fro');
-        fprintf('Monte=%d,Number of Sample=%d\n',i,n)
+        B_est = (S+hat_sigma_2*eye(p)) - lambda * sum_mat;%Banded plus Spiked Matrix
+        inv_hat_R = pinv(B_est);%Inverse Banded plus Spiked Matrix
+        tobasco_Sigma=TOBASCO(X,S,p,n,bandwidth);%TABASCO
+        inv_hat_TOBASCO=pinv(tobasco_Sigma);
+        factor=median(eigen)/MP_median(i);
+        % Compute SCNR for the current sample size
+        [local_rho_band(i),local_angle_band(i,:), local_Doppler_band(i,:)]= SCNR_avg(inv_hat_R, R, inv_R, M, N,ChannelNumber);
+        [local_rho_Diagonal(i),local_angle_Diagonal(i,:),local_Doppler_Diagonal(i,:)] = SCNR_avg(pinv(S+factor*eye(p)), R, inv_R, M, N,ChannelNumber);
+        [local_rho_Stein(i),local_angle_Stein(i,:),local_Doppler_Stein(i,:)] = SCNR_avg(inv_hat_Stein, R, inv_R, M, N,ChannelNumber);
+        [local_rho_TOBASCO(i),local_angle_TOBASCO(i,:),local_Doppler_TOBASCO(i,:)] = SCNR_avg(inv_hat_TOBASCO, R, inv_R, M, N,ChannelNumber);
+        fprintf('Samples=%f,Monte=%d\n',n,monte);
     end
-
-    time_elapsed=toc;
-    fprintf('Monte Carlo Complete for Samples=%d, Total Time Elapsed=%.3f\n',n,time_elapsed);
-
-    % Aggregate statistics across Monte Carlo runs
-    lambda_max_S = mean(local_lambda_max);
-    trace_S = mean(local_trace);
-    c_value = mean(local_c);
-    mean_error(n_idx)=mean(local_error);
-
-    % Variational inequality bound (different formula if n>=p)
-    if n>=p
-       epsilon_results(n_idx) = (sqrt(2*(p * (c_value + lambda_max_S)^2 + p * log(lambda_max_S) + p - trace_S / c_value)));
-    end
-    if n<p
-       epsilon_results(n_idx) = ((2*(p * (c_value + lambda_max_S) + p * log(c_value) + p - trace_S / c_value)));
-    end
+    Rho_Total_band(monte, :) = local_rho_band;
+    Rho_Total_Diagonal(monte, :) = local_rho_Diagonal;
+    Rho_Total_Stein(monte, :) = local_rho_Stein;
+    Rho_Total_TOBASCO(monte, :) = local_rho_TOBASCO;
+    Rho_Angle_band(monte,:,:)=local_angle_band;
+    Rho_Angle_Diagonal(monte,:,:)=local_angle_Diagonal;
+    Rho_Angle_Stein(monte,:,:)=local_angle_Stein;
+    Rho_Angle_TOBASCO(monte,:,:)=local_angle_TOBASCO;
+    Rho_Doppler_band(monte,:,:)=local_Doppler_band;
+    Rho_Doppler_Diagonal(monte,:,:)=local_Doppler_Diagonal;
+    Rho_Doppler_Stein(monte,:,:)=local_Doppler_Stein;
+    Rho_Doppler_TOBASCO(monte,:,:)=local_Doppler_TOBASCO;
 end
 
-%% ================================================================
-% Plot Results
-% ------------------------------------------------
-% Compare:
-%   - Variational Inequality Bound
-%   - Empirical Relative Error
-% ================================================================
-line_styles = {'-o', '--s', '-.^', ':d', '-x'}; 
-marker_styles = {'o', 's', '^', 'd', 'x'};
-
-figure;
+%% Compute the average SCNR across all Monte Carlo runs
+Avg_Rho_band = mean(Rho_Total_band, 1);
+Avg_Rho_Diagonal = mean(Rho_Total_Diagonal, 1);
+Avg_Rho_Stein=mean(Rho_Total_Stein, 1);
+Avg_Rho_TOBASCO=mean(Rho_Total_TOBASCO, 1);
+%% Angle: Compute the average SCNR across all Monte Carlo runs
+Avg_Angle_band = squeeze(mean(Rho_Angle_band, 1));
+Avg_Angle_Diagonal = squeeze(mean(Rho_Angle_Diagonal, 1));
+Avg_Angle_Stein=squeeze(mean(Rho_Angle_Stein, 1));
+Avg_Angle_TOBASCO=squeeze(mean(Rho_Angle_TOBASCO, 1));
+%% Doppler: Compute the average SCNR across all Monte Carlo runs
+Avg_Doppler_band = squeeze(mean(Rho_Doppler_band, 1));
+Avg_Doppler_Diagonal = squeeze(mean(Rho_Doppler_Diagonal, 1));
+Avg_Doppler_Stein=squeeze(mean(Rho_Doppler_Stein, 1));
+Avg_Doppler_TOBASCO=squeeze(mean(Rho_Doppler_TOBASCO, 1));
+%% Plot the results with LaTeX fonts
+f4=figure(4);
+semilogx(Num_samples, 10*log10(Avg_Rho_band), 'LineWidth', 2, 'MarkerSize', 8, 'Marker', 'o');
 hold on;
+semilogx(Num_samples, 10*log10(Avg_Rho_Diagonal), 'LineWidth', 2, 'MarkerSize', 8, 'Marker', '*');
+hold on;
+semilogx(Num_samples, 10*log10(Avg_Rho_Stein), 'LineWidth', 2, 'MarkerSize', 8, 'Marker', 'x');
+hold on;
+semilogx(Num_samples, 10*log10(Avg_Rho_TOBASCO), 'LineWidth', 2, 'MarkerSize', 8, 'Marker', 'diamond');
 
-plot(n_values, (epsilon_results/(p*norm(Sigma,'fro')))*100,'MarkerSize', 8, 'LineWidth', 1.5, 'DisplayName', 'Variational Inequality Bound', ...
-        'Marker', 'o');
-plot(n_values,(mean_error/(p*norm(Sigma,'fro')))*100,'MarkerSize', 8, 'LineWidth', 1.5, 'DisplayName', 'Relative Error', ...
-        'Marker', 's')
-
-xlim([min(n_values),max(n_values)]);
-set(gca, 'TickLabelInterpreter', 'latex', 'FontSize', 12); 
+set(gca, 'XScale', 'log');
 xlabel('Number of Samples', 'Interpreter', 'latex', 'FontSize', 14);
-ylabel('Relative Error $\%$', 'Interpreter', 'latex', 'FontSize', 14);
-legend('Interpreter', 'latex', 'FontSize', 14, 'Location', 'best');
+ylabel('Normalized SCNR (dB)', 'Interpreter', 'latex', 'FontSize', 14);
+%title('Normalized SCNR vs. Number of Samples', 'Interpreter', 'latex', 'FontSize', 16);
+grid on;
+legend({'Banded+Spiked', 'Diagonal Loading', 'Spiked', 'TABASCO'}, ...
+       'Interpreter', 'latex', 'FontSize', 12, 'Location', 'southeast');
+set(gca, 'TickLabelInterpreter', 'latex', 'FontSize', 12);
+save_current_fig(f4, 'Cofar256_Pulses_32', 'F:\Codes\Transient\Revision Codes\Revised Figures');
+%% Plot the Angle with LaTeX fonts
+f5=figure(5);
+plot(angle_rad, 10*log10(Avg_Angle_band(2,:)), 'LineWidth', 2, 'MarkerSize', 8,'Marker','o');
+hold on;
+plot(angle_rad, 10*log10(Avg_Angle_Diagonal(2,:)), 'LineWidth', 2, 'MarkerSize', 8,'Marker','*');
+hold on;
+plot(angle_rad, 10*log10(Avg_Angle_Stein(2,:)), 'LineWidth', 2, 'MarkerSize', 8,'Marker','x');
+hold on;
+plot(angle_rad, 10*log10(Avg_Angle_TOBASCO(2,:)), 'LineWidth', 2, 'MarkerSize', 8,'Marker','diamond');
+
+% Set axis labels and title with LaTeX interpreter
+xlabel('Azimuth (rad)', 'Interpreter', 'latex', 'FontSize', 14);
+ylabel('Normalized SCNR (dB)', 'Interpreter', 'latex', 'FontSize', 14);
+%title('Normalized SCNR vs. Azimuth', 'Interpreter', 'latex', 'FontSize', 16);
 grid on;
 
+% Set legend with LaTeX interpreter and location in southwest
+legend({'Banded+Spiked', 'Diagonal Loading', 'Spiked', 'TABASCO'}, ...
+       'Interpreter', 'latex', 'FontSize', 12, 'Location', 'southeast');
+xlim([-pi,pi]);
+% Set tick labels with LaTeX fonts
+set(gca, 'TickLabelInterpreter', 'latex', 'FontSize', 12);
+save_current_fig(f5, 'Cofar256_Pulses_32', 'F:\Codes\Transient\Revision Codes\Revised Figures');
+%% Plot the Doppler with LaTeX fonts
+f6=figure(6);
+plot(doppler, 10*log10(Avg_Doppler_band(2,:)), 'LineWidth', 2, 'MarkerSize', 8,'Marker','o');
+hold on;
+plot(doppler, 10*log10(Avg_Doppler_Diagonal(2,:)), 'LineWidth', 2, 'MarkerSize', 8,'Marker','*');
+hold on;
+plot(doppler, 10*log10(Avg_Doppler_Stein(2,:)), 'LineWidth', 2, 'MarkerSize', 8,'Marker','x');
+hold on;
+plot(doppler, 10*log10(Avg_Doppler_TOBASCO(2,:)), 'LineWidth', 2, 'MarkerSize', 8,'Marker','diamond');
+
+% Set axis labels and title with LaTeX interpreter
+xlabel('Normalized Doppler', 'Interpreter', 'latex', 'FontSize', 14);
+ylabel('Normalized SCNR (dB)', 'Interpreter', 'latex', 'FontSize', 14);
+%title('Normalized SCNR vs. Doppler', 'Interpreter', 'latex', 'FontSize', 16);
+grid on;
+
+% Set legend with LaTeX interpreter and location in southwest
+legend({'Banded+Spiked', 'Diagonal Loading', 'Spiked', 'TABASCO'}, ...
+       'Interpreter', 'latex', 'FontSize', 12, 'Location', 'southeast');
+
+% Set tick labels with LaTeX fonts
+set(gca, 'TickLabelInterpreter', 'latex', 'FontSize', 12);
+save_current_fig(f6, 'Cofar256_Pulses_32', 'F:\Codes\Transient\Revision Codes\Revised Figures');
+%%
+elapsedTime = toc;   % stop timer and get elapsed time
+fprintf('Total runtime: %.4f seconds\n', elapsedTime);
 %% ================================================================
 % Helper Functions
 % - createWeightMatrix
@@ -434,26 +515,26 @@ for i=1:p
     end
 end
 end
-% function [X_centered,S] = generateSampleCovariance(B, n)
-%     % Generate a sample covariance matrix from the banded PSD matrix
-%     % Inputs:
-%     %   B    - Banded PSD matrix (p x p)
-%     %   n    - Number of samples
-%     %   seed - Random seed for reproducibility
-%     % Output:
-%     %   S    - Sample covariance matrix (p x p)
-% 
-%     % Get the dimension of the banded matrix
-%     p = size(B, 1);
-% 
-%     % Generate n samples from a multivariate normal distribution
-%     % with mean zero and covariance B
-%     X = mvnrnd(zeros(1, p), B, n);  % (n x p) sample matrix
-% 
-%     % Compute the sample covariance matrix S manually
-%     X_centered = X - mean(X, 1);  % Center the data (subtract column mean)
-%     S = (X_centered' * X_centered) / (n - 1);  % Compute covariance matrix
-% end
+function [X_centered,S] = generateSampleCovariance(B, n)
+    % Generate a sample covariance matrix from the banded PSD matrix
+    % Inputs:
+    %   B    - Banded PSD matrix (p x p)
+    %   n    - Number of samples
+    %   seed - Random seed for reproducibility
+    % Output:
+    %   S    - Sample covariance matrix (p x p)
+
+    % Get the dimension of the banded matrix
+    p = size(B, 1);
+
+    % Generate n samples from a multivariate normal distribution
+    % with mean zero and covariance B
+    X = mvnrnd(zeros(1, p), B, n);  % (n x p) sample matrix
+
+    % Compute the sample covariance matrix S manually
+    X_centered = X - mean(X, 1);  % Center the data (subtract column mean)
+    S = (X_centered' * X_centered) / (n - 1);  % Compute covariance matrix
+end
 %%
 function [avg_rho, avg_Angle, avg_Doppler] = SCNR_avg(inv_hat_R, R, inv_R, M, N,ChannelNumber)
 % SCNR_avg - Compute the average normalized SCNR over angles and Doppler frequencies
