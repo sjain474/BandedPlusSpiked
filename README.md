@@ -8,7 +8,7 @@ This repository contains code to reproduce the results from the paper:
 
 ## Reproducing Figures
 
-- **Different number of Number of Pulses**  
+- **Different Number of Pulses**  
   Code: `BandedplusSpikedComputation.m`  
   Dataset: 
   -`Cofar_Monte100_ICM_14_31_Pulses_32.mat` (for 32 pulses)
